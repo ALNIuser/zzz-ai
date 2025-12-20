@@ -1,0 +1,5 @@
+ARI_URL = "http://192.168.1.100:8088"
+ARI_USER = "ai_ari_user"
+ARI_PASS = "1"
+ARI_APP = "ai_support_ari"
+LOG_LEVEL = "DEBUG"

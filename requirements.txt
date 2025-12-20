@@ -1,0 +1,3 @@
+aioari==0.9.4
+aiohttp
+asyncio

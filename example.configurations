@@ -1,0 +1,67 @@
+[root@freepbx ~]# asterisk -rx "ari show apps"
+Application Name         
+=========================
+ai_support_ari           
+[root@freepbx ~]# asterisk -rx "module show like external"
+Module                         Description                              Use Count  Status      Support Level
+app_externalivr.so             External IVR Interface Application       0          Running          extended
+1 modules loaded
+[root@freepbx ~]# asterisk -rx "http show status"
+HTTP Server Status:
+Prefix: 
+Server: Asterisk/16.24.1
+Server Enabled and Bound to [::]:8088
+
+HTTPS Server Enabled and Bound to [::]:8089
+
+Enabled URI's:
+/httpstatus => Asterisk HTTP General Status
+/ari/... => Asterisk RESTful API
+/ws => Asterisk HTTP WebSocket
+
+Enabled Redirects:
+  None.
+[root@freepbx ~]# cat /etc/asterisk/ari.conf
+[general]
+enabled = yes
+
+[ai_ari_user]
+type = user
+read_only = no
+password = 1
+
+[root@freepbx ~]# 
+[root@freepbx ~]# cat /etc/asterisk/ari.conf
+[general]
+enabled = yes
+pretty = yes
+allowed_origins = *
+
+[ai_ari_user]
+type = user
+read_only = no
+password = 1
+
+[root@freepbx ~]# 
+
+
+[root@freepbx ~]# cat /etc/asterisk/http.conf
+#include http_additional.conf
+#include http_custom.conf
+[general]
+enabled = yes
+bindaddr = 0.0.0.0
+bindport = 8088
+
+
+
+[root@freepbx ~]# cat /etc/asterisk/extensions_custom.conf
+; =========================================================
+; CUSTOM DIALPLAN — ARI ENTRY POINT
+; =========================================================
+
+[ari-entry]
+exten => 1000,1,NoOp(ARI ENTRY)
+ same => n,Answer()
+ same => n,Stasis(ai_support_ari)
+ same => n,Hangup()

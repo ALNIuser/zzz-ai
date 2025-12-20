@@ -1,0 +1,39 @@
+# Конфиденциальные данные
+.env
+*.db
+*.sqlite3
+*.log
+secrets.json
+
+# Виртуальное окружение Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.sublime-*
+
+# Тестовые файлы
+test_*.py
+coverage.xml
+.tox/
+.cache/
+nosetests.xml
+coverage/
+
+# Дистрибутивы
+dist/
+build/
+*.egg-info/
