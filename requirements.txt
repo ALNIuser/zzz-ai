@@ -1,3 +1,14 @@
-aioari==0.9.4
-aiohttp
-asyncio
+aioari==0.10.2
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.2
+aiosignal==1.4.0
+aioswagger11==0.9.1
+async-timeout==5.0.1
+attrs==25.4.0
+frozenlist==1.8.0
+idna==3.11
+multidict==6.7.0
+propcache==0.4.1
+python-dotenv==1.2.1
+typing_extensions==4.15.0
+yarl==1.22.0
