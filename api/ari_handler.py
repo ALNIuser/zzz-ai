@@ -1,8 +1,11 @@
 import asyncio
 import logging
 import json
+import os
 import aiohttp
 import aioari
+
+from .yandex_tts import synthesize
 
 # ================== НАСТРОЙКИ ==================
 
@@ -11,7 +14,10 @@ ARI_USER = "ai_ari_user"
 ARI_PASS = "1"
 ARI_APP = "ai_support_ari"
 
-SOUND = "demo-congrats"
+# TTS
+TTS_TEXT = "Здравствуйте. Вы позвонили в техническую поддержку компании СКС сервис, чем мы можем вам помочь?"
+TTS_NAME = "greeting"
+TTS_PATH = f"/var/lib/asterisk/sounds/tts/{TTS_NAME}.wav"
 
 # ================== LOGGING ====================
 
@@ -19,23 +25,59 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-
 log = logging.getLogger("ARI")
 
 # ================== GLOBAL =====================
 
 ari = None
-
-# playback_id -> channel_id
-PLAYBACK_CHANNEL_MAP = {}
+sessions = {}
 
 IMPORTANT_EVENTS = {
     "StasisStart",
     "PlaybackFinished",
-    "StasisEnd",
+    "ChannelHangupRequest",
+    "StasisEnd"
 }
 
-# ================== EVENT HANDLER ==============
+# ================== CALL SESSION ===============
+
+class CallSession:
+    def __init__(self, ari, channel_id):
+        self.ari = ari
+        self.channel_id = channel_id
+        self.playback_id = None
+
+    async def start(self):
+        log.info("CallSession start: %s", self.channel_id)
+
+        await self.ari.channels.answer(channelId=self.channel_id)
+        log.info("Channel answered: %s", self.channel_id)
+
+        playback = await self.ari.channels.play(
+            channelId=self.channel_id,
+            media=f"sound:tts/{TTS_NAME}"
+        )
+
+        self.playback_id = playback.id
+        log.info(
+            "Playback started: %s (%s)",
+            TTS_NAME,
+            self.playback_id
+        )
+
+    async def on_playback_finished(self):
+        log.info("Playback finished for channel %s", self.channel_id)
+
+        try:
+            await self.ari.channels.hangup(channelId=self.channel_id)
+            log.info("Channel hung up: %s", self.channel_id)
+        except Exception as e:
+            log.warning("Hangup failed: %s", e)
+
+    async def cleanup(self):
+        log.info("Cleanup session: %s", self.channel_id)
+
+# ================== EVENT HANDLER ===============
 
 async def handle_event(event: dict):
     event_type = event.get("type")
@@ -45,74 +87,46 @@ async def handle_event(event: dict):
 
     log.info("ARI event: %s", event_type)
 
-    # -------- STASIS START --------
     if event_type == "StasisStart":
-        channel = event["channel"]
-        channel_id = channel["id"]
-
-        log.info("Call entered Stasis: %s", channel_id)
-
-        try:
-            await ari.channels.answer(channelId=channel_id)
-            log.info("Channel answered: %s", channel_id)
-
-            playback = await ari.channels.play(
-                channelId=channel_id,
-                media=f"sound:{SOUND}"
-            )
-
-            playback_id = playback.id   # <-- КЛЮЧЕВОЙ ФИКС
-            PLAYBACK_CHANNEL_MAP[playback_id] = channel_id
-
-            log.info(
-                "Playback started: %s (playback_id=%s)",
-                SOUND,
-                playback_id
-            )
-
-        except Exception as e:
-            log.error("Error handling channel %s: %s", channel_id, e)
-            try:
-                await ari.channels.hangup(channelId=channel_id)
-            except Exception:
-                pass
-
-    # -------- PLAYBACK FINISHED --------
-    elif event_type == "PlaybackFinished":
-        playback = event["playback"]
-        playback_id = playback["id"]
-
-        channel_id = PLAYBACK_CHANNEL_MAP.pop(playback_id, None)
-
-        log.info(
-            "Playback finished: playback=%s channel=%s",
-            playback_id,
-            channel_id
-        )
+        channel = event.get("channel", {})
+        channel_id = channel.get("id")
 
         if not channel_id:
-            log.warning("No channel mapped to playback %s", playback_id)
             return
 
-        try:
-            await ari.channels.hangup(channelId=channel_id)
-            log.info("Channel hung up: %s", channel_id)
-        except Exception as e:
-            log.error("Failed to hangup channel %s: %s", channel_id, e)
+        session = CallSession(ari, channel_id)
+        sessions[channel_id] = session
+        await session.start()
 
-    # -------- STASIS END --------
+    elif event_type == "PlaybackFinished":
+        playback = event.get("playback", {})
+        playback_id = playback.get("id")
+
+        for session in sessions.values():
+            if session.playback_id == playback_id:
+                await session.on_playback_finished()
+                break
+
     elif event_type == "StasisEnd":
-        channel = event["channel"]
-        channel_id = channel["id"]
-        log.info("Call left Stasis: %s", channel_id)
+        channel = event.get("channel", {})
+        channel_id = channel.get("id")
 
-# ================== MAIN =======================
+        session = sessions.pop(channel_id, None)
+        if session:
+            await session.cleanup()
+            log.info("Call ended: %s", channel_id)
+
+# ================== MAIN ========================
 
 async def main():
     global ari
 
     log.info("Connecting to ARI REST: %s", ARI_URL)
 
+    # --- Генерация TTS ОДИН РАЗ ---
+    synthesize(TTS_TEXT, TTS_PATH)
+
+    # --- ARI REST ---
     ari = await aioari.connect(
         ARI_URL,
         ARI_USER,
@@ -121,11 +135,11 @@ async def main():
 
     log.info("ARI REST connected")
 
+    # --- ARI WebSocket ---
     ws_url = (
         f"{ARI_URL.replace('http://', 'ws://')}/ari/events"
         f"?app={ARI_APP}"
         f"&api_key={ARI_USER}:{ARI_PASS}"
-        f"&subscribeAll=true"
     )
 
     session = aiohttp.ClientSession()
@@ -141,11 +155,7 @@ async def main():
                 await handle_event(event)
 
             elif msg.type == aiohttp.WSMsgType.ERROR:
-                log.error("WebSocket error: %s", ws.exception())
-                break
-
-            elif msg.type == aiohttp.WSMsgType.CLOSED:
-                log.warning("WebSocket closed")
+                log.error("WebSocket error")
                 break
 
     finally:
@@ -154,7 +164,7 @@ async def main():
         await ari.close()
         log.info("ARI handler stopped")
 
-# ================== ENTRY ======================
+# ================== ENTRY =======================
 
 if __name__ == "__main__":
     asyncio.run(main())
