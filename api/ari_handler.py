@@ -11,9 +11,6 @@ ARI_USER = "ai_ari_user"
 ARI_PASS = "1"
 ARI_APP = "ai_support_ari"
 
-# Имя звукового файла БЕЗ расширения
-# Если demo-congrats.gsm существует - оставьте
-# Если нет - замените на hello-world или beep
 SOUND = "demo-congrats"
 
 # ================== LOGGING ====================
@@ -22,86 +19,108 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+
 log = logging.getLogger("ARI")
 
-# ============== GLOBAL CLIENT ==================
+# ================== GLOBAL =====================
 
 ari = None
 
-# ============== ВАЖНЫЕ СОБЫТИЯ =================
+# playback_id -> channel_id
+PLAYBACK_CHANNEL_MAP = {}
 
 IMPORTANT_EVENTS = {
     "StasisStart",
-    "StasisEnd",
     "PlaybackFinished",
-    "ChannelHangupRequest"
+    "StasisEnd",
 }
 
-# ============== EVENT HANDLER ==================
+# ================== EVENT HANDLER ==============
 
 async def handle_event(event: dict):
     event_type = event.get("type")
-    
-    # Логируем только важные события
+
     if event_type not in IMPORTANT_EVENTS:
         return
-        
-    log.info("ARI event received: %s", event_type)
 
+    log.info("ARI event: %s", event_type)
+
+    # -------- STASIS START --------
     if event_type == "StasisStart":
-        channel = event.get("channel", {})
-        channel_id = channel.get("id")
+        channel = event["channel"]
+        channel_id = channel["id"]
 
-        log.info("Call entered Stasis: channel=%s", channel_id)
+        log.info("Call entered Stasis: %s", channel_id)
 
         try:
-            # 1. Ответить на канал
             await ari.channels.answer(channelId=channel_id)
             log.info("Channel answered: %s", channel_id)
-            
-            # 2. Проиграть звук
-            await ari.channels.play(
+
+            playback = await ari.channels.play(
                 channelId=channel_id,
                 media=f"sound:{SOUND}"
             )
-            log.info("Playback started: %s", SOUND)
-            
+
+            playback_id = playback.id   # <-- КЛЮЧЕВОЙ ФИКС
+            PLAYBACK_CHANNEL_MAP[playback_id] = channel_id
+
+            log.info(
+                "Playback started: %s (playback_id=%s)",
+                SOUND,
+                playback_id
+            )
+
         except Exception as e:
-            log.error("Failed to handle channel %s: %s", channel_id, e)
-            # При ошибке возвращаем канал в dialplan
+            log.error("Error handling channel %s: %s", channel_id, e)
             try:
-                await ari.channels.continueInDialplan(channelId=channel_id)
-            except:
+                await ari.channels.hangup(channelId=channel_id)
+            except Exception:
                 pass
 
+    # -------- PLAYBACK FINISHED --------
     elif event_type == "PlaybackFinished":
-        log.info("Playback finished")
-        # После завершения воспроизведения можно что-то сделать
-        # Например, вернуть в dialplan или начать запись
-        
+        playback = event["playback"]
+        playback_id = playback["id"]
+
+        channel_id = PLAYBACK_CHANNEL_MAP.pop(playback_id, None)
+
+        log.info(
+            "Playback finished: playback=%s channel=%s",
+            playback_id,
+            channel_id
+        )
+
+        if not channel_id:
+            log.warning("No channel mapped to playback %s", playback_id)
+            return
+
+        try:
+            await ari.channels.hangup(channelId=channel_id)
+            log.info("Channel hung up: %s", channel_id)
+        except Exception as e:
+            log.error("Failed to hangup channel %s: %s", channel_id, e)
+
+    # -------- STASIS END --------
     elif event_type == "StasisEnd":
-        channel = event.get("channel", {})
-        channel_id = channel.get("id")
-        log.info("Call left Stasis: channel=%s", channel_id)
+        channel = event["channel"]
+        channel_id = channel["id"]
+        log.info("Call left Stasis: %s", channel_id)
 
-
-# ============== MAIN ===========================
+# ================== MAIN =======================
 
 async def main():
     global ari
 
-    log.info("Connecting to ARI REST at %s", ARI_URL)
+    log.info("Connecting to ARI REST: %s", ARI_URL)
 
-    # Подключаемся к REST API aioari
     ari = await aioari.connect(
         ARI_URL,
         ARI_USER,
         ARI_PASS
     )
 
-    log.info("ARI REST client connected")
+    log.info("ARI REST connected")
 
-    # --- WebSocket вручную через aiohttp ---
     ws_url = (
         f"{ARI_URL.replace('http://', 'ws://')}/ari/events"
         f"?app={ARI_APP}"
@@ -112,8 +131,8 @@ async def main():
     session = aiohttp.ClientSession()
     ws = await session.ws_connect(ws_url)
 
-    log.info("WebSocket connected to ARI events")
-    log.info("ARI handler started. Waiting for calls...")
+    log.info("ARI WebSocket connected")
+    log.info("Waiting for calls...")
 
     try:
         async for msg in ws:
@@ -124,22 +143,18 @@ async def main():
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 log.error("WebSocket error: %s", ws.exception())
                 break
+
             elif msg.type == aiohttp.WSMsgType.CLOSED:
-                log.info("WebSocket closed")
+                log.warning("WebSocket closed")
                 break
-                
-    except asyncio.CancelledError:
-        log.info("Shutting down...")
-    except Exception as e:
-        log.error("Unexpected error: %s", e)
+
     finally:
         await ws.close()
         await session.close()
         await ari.close()
         log.info("ARI handler stopped")
 
-
-# ============== ENTRY POINT ====================
+# ================== ENTRY ======================
 
 if __name__ == "__main__":
     asyncio.run(main())
