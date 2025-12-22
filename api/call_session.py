@@ -1,40 +1,107 @@
+import os
+import uuid
 import asyncio
 import logging
-import uuid
 
-log = logging.getLogger("ARI")
+from api.yandex_tts import synthesize
+from api.yandex_stt import recognize_pcm
+
 
 class CallSession:
-    def __init__(self, ari, channel_id, sound):
+    def __init__(self, ari, channel, recordings_dir):
         self.ari = ari
-        self.channel_id = channel_id
-        self.sound = sound
+        self.channel = channel
+        self.recordings_dir = recordings_dir
 
-        self.playback_id = None
-        self.recording_name = None
+        self.call_id = str(uuid.uuid4())
+        self.logger = logging.getLogger(f"CallSession[{self.call_id[:8]}]")
+
+        self.active = True
 
     async def start(self):
-        log.info("CallSession start: %s", self.channel_id)
+        self.logger.info("Call started")
 
-        # Ответить
-        await self.ari.channels.answer(channelId=self.channel_id)
-        log.info("Channel answered: %s", self.channel_id)
+        await self.channel.answer()
+        self.logger.info("Channel answered")
 
-        # Проиграть звук
-        playback = await self.ari.channels.play(
-            channelId=self.channel_id,
-            media=f"sound:{self.sound}"
+        # 1. Приветствие
+        greeting_text = (
+            "Здравствуйте. Вы позвонили в техническую поддержку компании СКС сервис. "
+            "Пожалуйста, опишите вашу проблему."
         )
 
-        self.playback_id = playback.id
-        log.info("Playback started: %s (%s)", self.sound, self.playback_id)
+        greeting_path = f"/tmp/greeting_{self.call_id}.wav"
+        synthesize(greeting_text, greeting_path)
 
-    async def on_playback_finished(self):
-        log.info("Playback finished for channel %s", self.channel_id)
+        await self.play(greeting_path)
 
-        # Завершаем вызов (пока без STT)
-        await self.ari.channels.hangup(channelId=self.channel_id)
-        log.info("Channel hung up: %s", self.channel_id)
+        # 2. Запись речи пользователя (3 сек)
+        recording_path = await self.record_user()
 
-    async def cleanup(self):
-        log.info("Cleanup session: %s", self.channel_id)
+        # 3. STT
+        text = self.process_stt(recording_path)
+
+        if text:
+            self.logger.info(f"User said: {text}")
+            response_text = "Спасибо. Ваше обращение принято."
+        else:
+            response_text = "Извините, я вас не расслышал."
+
+        # 4. Ответ
+        response_path = f"/tmp/response_{self.call_id}.wav"
+        synthesize(response_text, response_path)
+
+        await self.play(response_path)
+
+        # 5. Завершение
+        await asyncio.sleep(0.5)
+        await self.channel.hangup()
+        self.logger.info("Call finished")
+
+    async def play(self, wav_path: str):
+        playback = self.ari.playbacks.create()
+        await self.channel.play(
+            media=f"sound:{wav_path}",
+            playbackId=playback.id
+        )
+
+        # Ждём завершения воспроизведения
+        future = asyncio.get_event_loop().create_future()
+
+        async def on_finished(event, *args):
+            if not future.done():
+                future.set_result(True)
+
+        self.ari.on_event("PlaybackFinished", on_finished)
+        await future
+
+    async def record_user(self) -> str:
+        os.makedirs(self.recordings_dir, exist_ok=True)
+
+        recording_name = f"user_{self.call_id}"
+        recording_path = os.path.join(self.recordings_dir, recording_name)
+
+        self.logger.info("Recording user speech (3 seconds)")
+
+        await self.channel.record(
+            name=recording_name,
+            format="slin",
+            maxDurationSeconds=3,
+            beep=False,
+            terminateOn="none"
+        )
+
+        await asyncio.sleep(3.2)
+
+        return recording_path + ".slin"
+
+    def process_stt(self, recording_path: str) -> str | None:
+        if not os.path.exists(recording_path):
+            self.logger.error("Recording file not found")
+            return None
+
+        with open(recording_path, "rb") as f:
+            pcm_data = f.read()
+
+        return recognize_pcm(pcm_data)
+

@@ -1,170 +1,160 @@
 import asyncio
-import logging
 import json
+import logging
 import os
+from urllib.parse import urlparse
+
 import aiohttp
 import aioari
+from dotenv import load_dotenv
 
-from .yandex_tts import synthesize
+load_dotenv()
 
-# ================== НАСТРОЙКИ ==================
+ARI_BASE_URL = os.getenv("ARI_BASE_URL", "").strip()  # например: http://192.168.1.100:8088/ari
+ARI_HOST = os.getenv("ARI_HOST", "192.168.1.100")
+ARI_PORT = int(os.getenv("ARI_PORT", "8088"))
 
-ARI_URL = "http://192.168.1.100:8088"
-ARI_USER = "ai_ari_user"
-ARI_PASS = "1"
-ARI_APP = "ai_support_ari"
+ARI_USER = os.getenv("ARI_USER", "ai_ari_user")
+ARI_PASSWORD = os.getenv("ARI_PASSWORD", "1")
+ARI_APP_NAME = os.getenv("ARI_APP_NAME", "ai_support_ari")
+ARI_WS_URL = os.getenv("ARI_WS_URL", "").strip()
 
-# TTS
-TTS_TEXT = "Здравствуйте. Вы позвонили в техническую поддержку компании СКС сервис, чем мы можем вам помочь?"
-TTS_NAME = "greeting"
-TTS_PATH = f"/var/lib/asterisk/sounds/tts/{TTS_NAME}.wav"
+UBUNTU_IP = os.getenv("UBUNTU_IP", "192.168.1.2")
+RTP_PORT = int(os.getenv("RTP_PORT", os.getenv("RTP_IN_PORT", "4000")))
 
-# ================== LOGGING ====================
+RTP_FORMAT = (os.getenv("RTP_FORMAT", "ulaw") or "ulaw").strip().lower()
+if RTP_FORMAT not in ("ulaw", "slin", "slin16"):
+    RTP_FORMAT = "ulaw"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("ARI")
 
-# ================== GLOBAL =====================
-
 ari = None
-sessions = {}
+sessions = {}  # key=channel_id -> {bridge_id, external_id}
 
-IMPORTANT_EVENTS = {
-    "StasisStart",
-    "PlaybackFinished",
-    "ChannelHangupRequest",
-    "StasisEnd"
-}
 
-# ================== CALL SESSION ===============
+def _ari_http_base() -> str:
+    """
+    aioari.connect ждёт базу вида http://host:port (без /ari).
+    """
+    if ARI_BASE_URL:
+        p = urlparse(ARI_BASE_URL)
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+    return f"http://{ARI_HOST}:{ARI_PORT}"
 
-class CallSession:
-    def __init__(self, ari, channel_id):
-        self.ari = ari
-        self.channel_id = channel_id
-        self.playback_id = None
 
-    async def start(self):
-        log.info("CallSession start: %s", self.channel_id)
+def _ari_ws_url() -> str:
+    if ARI_WS_URL:
+        return ARI_WS_URL
+    return f"ws://{ARI_HOST}:{ARI_PORT}/ari/events?app={ARI_APP_NAME}&api_key={ARI_USER}:{ARI_PASSWORD}"
 
-        await self.ari.channels.answer(channelId=self.channel_id)
-        log.info("Channel answered: %s", self.channel_id)
 
-        playback = await self.ari.channels.play(
-            channelId=self.channel_id,
-            media=f"sound:tts/{TTS_NAME}"
-        )
+def is_external_channel(channel: dict) -> bool:
+    name = channel.get("name", "") or ""
+    return name.startswith("UnicastRTP/") or "UnicastRTP" in name or name.startswith("ExternalMedia/")
 
-        self.playback_id = playback.id
-        log.info(
-            "Playback started: %s (%s)",
-            TTS_NAME,
-            self.playback_id
-        )
 
-    async def on_playback_finished(self):
-        log.info("Playback finished for channel %s", self.channel_id)
+async def cleanup(channel_id: str):
+    data = sessions.pop(channel_id, None)
+    if not data:
+        return
+    try:
+        await ari.channels.hangup(channelId=data["external_id"])
+    except Exception:
+        pass
+    try:
+        await ari.bridges.destroy(bridgeId=data["bridge_id"])
+    except Exception:
+        pass
+    try:
+        await ari.channels.hangup(channelId=channel_id)
+    except Exception:
+        pass
 
-        try:
-            await self.ari.channels.hangup(channelId=self.channel_id)
-            log.info("Channel hung up: %s", self.channel_id)
-        except Exception as e:
-            log.warning("Hangup failed: %s", e)
 
-    async def cleanup(self):
-        log.info("Cleanup session: %s", self.channel_id)
+async def handle_stasis_start(event: dict):
+    channel = event.get("channel") or {}
+    channel_id = channel.get("id")
+    channel_name = channel.get("name", "")
 
-# ================== EVENT HANDLER ===============
-
-async def handle_event(event: dict):
-    event_type = event.get("type")
-
-    if event_type not in IMPORTANT_EVENTS:
+    if not channel_id:
         return
 
-    log.info("ARI event: %s", event_type)
+    # чтобы не зациклиться на ExternalMedia канале
+    if is_external_channel(channel):
+        log.info(f"Ignored ExternalMedia channel: {channel_name}")
+        return
 
-    if event_type == "StasisStart":
-        channel = event.get("channel", {})
-        channel_id = channel.get("id")
+    if channel_id in sessions:
+        return
 
-        if not channel_id:
-            return
+    log.info(f"StasisStart: {channel_name} ({channel_id})")
 
-        session = CallSession(ari, channel_id)
-        sessions[channel_id] = session
-        await session.start()
+    try:
+        await ari.channels.answer(channelId=channel_id)
 
-    elif event_type == "PlaybackFinished":
-        playback = event.get("playback", {})
-        playback_id = playback.get("id")
+        bridge = await ari.bridges.create(type="mixing")
+        await ari.bridges.addChannel(bridgeId=bridge.id, channel=channel_id)
 
-        for session in sessions.values():
-            if session.playback_id == playback_id:
-                await session.on_playback_finished()
-                break
+        # ExternalMedia: Asterisk будет слать RTP на UBUNTU_IP:RTP_PORT
+        ext = await ari.channels.externalMedia(
+            app=ARI_APP_NAME,
+            external_host=f"{UBUNTU_IP}:{RTP_PORT}",
+            format=RTP_FORMAT,          # ulaw
+            direction="both",
+            encapsulation="rtp",
+        )
 
-    elif event_type == "StasisEnd":
-        channel = event.get("channel", {})
-        channel_id = channel.get("id")
+        await ari.bridges.addChannel(bridgeId=bridge.id, channel=ext.id)
 
-        session = sessions.pop(channel_id, None)
-        if session:
-            await session.cleanup()
-            log.info("Call ended: %s", channel_id)
+        sessions[channel_id] = {"bridge_id": bridge.id, "external_id": ext.id}
+        log.info(f"Connected ExternalMedia to {UBUNTU_IP}:{RTP_PORT} format={RTP_FORMAT}")
 
-# ================== MAIN ========================
+    except Exception as e:
+        log.error(f"Call setup failed: {e}")
+        await cleanup(channel_id)
+
+
+async def handle_stasis_end(event: dict):
+    channel = event.get("channel") or {}
+    channel_id = channel.get("id")
+    if channel_id:
+        await cleanup(channel_id)
+        log.info(f"StasisEnd: {channel_id} cleaned")
+
 
 async def main():
     global ari
 
-    log.info("Connecting to ARI REST: %s", ARI_URL)
+    ari_http = _ari_http_base()
+    ws_url = _ari_ws_url()
 
-    # --- Генерация TTS ОДИН РАЗ ---
-    synthesize(TTS_TEXT, TTS_PATH)
-
-    # --- ARI REST ---
-    ari = await aioari.connect(
-        ARI_URL,
-        ARI_USER,
-        ARI_PASS
-    )
-
+    log.info(f"Connecting ARI REST: {ari_http} (user={ARI_USER}, app={ARI_APP_NAME})")
+    ari = await aioari.connect(ari_http, ARI_USER, ARI_PASSWORD)
     log.info("ARI REST connected")
 
-    # --- ARI WebSocket ---
-    ws_url = (
-        f"{ARI_URL.replace('http://', 'ws://')}/ari/events"
-        f"?app={ARI_APP}"
-        f"&api_key={ARI_USER}:{ARI_PASS}"
-    )
-
+    log.info(f"Connecting ARI WS: {ws_url}")
     session = aiohttp.ClientSession()
     ws = await session.ws_connect(ws_url)
-
-    log.info("ARI WebSocket connected")
-    log.info("Waiting for calls...")
+    log.info("ARI WS connected. Waiting for calls...")
 
     try:
         async for msg in ws:
-            if msg.type == aiohttp.WSMsgType.TEXT:
-                event = json.loads(msg.data)
-                await handle_event(event)
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            event = json.loads(msg.data)
+            etype = event.get("type")
 
-            elif msg.type == aiohttp.WSMsgType.ERROR:
-                log.error("WebSocket error")
-                break
-
+            if etype == "StasisStart":
+                await handle_stasis_start(event)
+            elif etype in ("StasisEnd", "ChannelHangupRequest"):
+                await handle_stasis_end(event)
     finally:
         await ws.close()
         await session.close()
         await ari.close()
-        log.info("ARI handler stopped")
 
-# ================== ENTRY =======================
 
 if __name__ == "__main__":
     asyncio.run(main())
