@@ -191,7 +191,7 @@ def process_utterance(sess: Session, pcm_bytes: bytes):
     try:
         text = recognize_pcm(pcm_bytes, sample_rate=SAMPLE_RATE)
         if not text:
-            reply = "Я вас не расслышал. Назовите, пожалуйста, модель оборудования и что именно не работает."
+            reply = "Я вас не расслышала. Назовите, пожалуйста, модель оборудования и что именно не работает."
         else:
             sess.messages.append({"role": "user", "content": text})
             reply = chat(sess.messages) or "Уточните, пожалуйста, модель оборудования и симптомы."
@@ -210,9 +210,9 @@ def main():
         raise RuntimeError("RTP_FORMAT must be ulaw or slin/slin16")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", RTP_PORT))
+    sock.bind(("192.168.1.2", RTP_PORT))
 
-    print(f"[media_server] RTP listening on 0.0.0.0:{RTP_PORT}, format={RTP_FORMAT}, sr={SAMPLE_RATE}")
+    print(f"[media_server] RTP listening on 192.168.1.2:{RTP_PORT}, format={RTP_FORMAT}, sr={SAMPLE_RATE}")
 
     sessions = {}
 
