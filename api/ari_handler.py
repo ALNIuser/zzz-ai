@@ -22,7 +22,15 @@ MEDIA_SERVER_PORT = int(os.getenv("RTP_PORT", "9000"))
 MEDIA_FORMAT = "ulaw"
 # ======================
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Настройка логирования с записью в файл
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("dialog_log.txt", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
 log = logging.getLogger("ARI")
 
 ari = None

@@ -4,7 +4,7 @@ import socket
 import time
 import audioop
 import threading
-from queue import Queue
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -31,6 +31,17 @@ DEFAULT_VOICE = "oksana"
 VOICE = os.getenv("YANDEX_TTS_VOICE", DEFAULT_VOICE)
 os.environ["YANDEX_TTS_VOICE"] = VOICE
 
+# Настройка логирования с записью в файл
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("dialog_log.txt", encoding="utf-8", mode="a"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger("media_server")
+
 print(f"\n✅ Используется голос по умолчанию: {VOICE}\n")
 
 executor = ThreadPoolExecutor(max_workers=4)
@@ -38,7 +49,7 @@ executor = ThreadPoolExecutor(max_workers=4)
 # ======= Telegram (заготовка) =======
 def telegram_escalate(text: str):
     # TODO: отправка в TG (token/chat_id из env)
-    print(f"[TG] ЭСКАЛАЦИЯ: {text}")
+    log.info(f"[TG] ЭСКАЛАЦИЯ: {text}")
 # ===================================
 
 def ulaw_to_pcm(payload: bytes) -> bytes:
@@ -140,7 +151,7 @@ class Session:
                 time.sleep(0.02)
 
     def tts_and_play(self, text: str):
-        print(f"[TTS] {text}")
+        log.info(f"[TTS] {text}")
         pcm = synthesize_pcm(text)
         self.send_pcm(pcm)
 
@@ -179,7 +190,7 @@ class Session:
             if not text:
                 return
 
-            print(f"[STT] {text}")
+            log.info(f"[STT] {text}")
             self.messages.append({"role": "user", "content": text})
 
             if "авар" in text.lower() or "пожар" in text.lower():
@@ -193,7 +204,7 @@ class Session:
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", RTP_PORT))
-    print(f"[media_server] RTP listening on :{RTP_PORT}")
+    log.info(f"RTP listening on :{RTP_PORT}")
 
     sessions = {}
 
@@ -210,7 +221,7 @@ def main():
         if not sess:
             sess = Session(sock, addr)
             sessions[addr] = sess
-            print(f"[media_server] new call from {addr}")
+            log.info(f"new call from {addr}")
 
         sess.feed(payload)
 
