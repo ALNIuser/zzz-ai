@@ -2,6 +2,8 @@
 
 
 Звонящий абонент → Asterisk PBX → ARI Handler → Media Server → [STT → LLM → TTS] → Asterisk → Звонящий
+
+
 Компоненты системы
 1. Взаимодействие с Asterisk (ari_handler.py)
 Назначение: Прием входящих звонков через Asterisk REST Interface (ARI)
